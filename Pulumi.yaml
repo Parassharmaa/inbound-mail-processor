@@ -1,0 +1,16 @@
+# Pulumi project file
+# https://www.pulumi.com/docs/intro/concepts/project/
+
+name: project-name
+runtime: python
+description: A project deployed via Pulumi
+# Where __main__.py is located
+main: ./pulumi
+# Where stack configs are located
+config: ./pulumi/stacks
+# Default config for stacks
+template:
+  config:
+    aws:region:
+      description: The AWS region to deploy into
+      default: eu-west-1
