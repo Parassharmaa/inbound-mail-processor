@@ -1,13 +1,16 @@
 # Pulumi project file
 # https://www.pulumi.com/docs/intro/concepts/project/
 
-name: project-name
+name: inbound-mail-processor
 runtime: python
-description: A project deployed via Pulumi
+description: creates an email address for which emails get automatically processed by a Lambda.
+
 # Where __main__.py is located
 main: ./pulumi
+
 # Where stack configs are located
 config: ./pulumi/stacks
+
 # Default config for stacks
 template:
   config:
