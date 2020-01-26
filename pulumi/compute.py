@@ -1,79 +1,170 @@
 import os
-import json
-
 import pulumi
-from pulumi_aws import lambda_, iam
-
+from pulumi_aws import route53, ses, lambda_, config, sns, iam
 from utils import format_resource_name, filebase64sha256
-from storage import bucket
+from pathlib import Path
+from zipfile import ZipFile
 
-# https://www.pulumi.com/docs/intro/concepts/config/
-config = pulumi.Config()
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DIST_DIR = os.path.join(PROJECT_DIR, 'dist')
+pulumi_config = pulumi.Config()
 
-# Create role for Lambda
-role = iam.Role(
-    resource_name=format_resource_name(name='role'),
-    description=f'Role used by Lambda to run the `{pulumi.get_project()}-{pulumi.get_stack()}` project',
-    assume_role_policy=json.dumps({
-      "Version": "2012-10-17",
-      "Statement": [{
-        "Sid": "",
-        "Effect": "Allow",
-        "Action": "sts:AssumeRole", 
-        "Principal": {
-          "Service": [
-            "lambda.amazonaws.com"
-          ]
-        },
-      }]
-    }),
-)
+class InboundMailProcessor(pulumi.ComponentResource):
+    """
+    An InboundMailProcessor creates an email address for which emails get
+    automatically processed by a Lambda.
 
-# Attach the basic Lambda execution policy to our Role
-iam.RolePolicyAttachment(
-    resource_name=format_resource_name(name='policy-attachment'),
-    policy_arn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
-    role=role.name,
-)
+    If a handler is specificied, custom logic can be added such as sending a
+    POST request to a form after clicking the validation link in the email.
 
-# Create Lambda layer
-LAYER_PATH = os.path.join(DIST_DIR, 'layer.zip')
-layer = lambda_.LayerVersion(
-    resource_name=format_resource_name(name='layer'),
-    layer_name=format_resource_name(name='layer'),
-    compatible_runtimes=['python3.7'],
-    description=f'Layer containing the dependencies for the `{pulumi.get_project()}` ({pulumi.get_stack()}) project',
-    code=LAYER_PATH,
-    source_code_hash=filebase64sha256(LAYER_PATH),
-)
+    Default behavior is to simply click the first link it finds.
+    """
+    def __init__(self,
+                 name,
+                 zone_name,
+                 domain,
+                 recipients,
+                 handler="handler.py",
+                 opts=None):
+        """
+        :name: name of the resource
+        :zone_name: name of the route53 zone
+        :domain: domain name for email
+        :recipients: list of emails
+        :handler: path to the Lambda handler module, if any
+        """
+        super().__init__('nuage:aws:InboundMailProcessor', name, None, opts)
+        # Get or create package directory
+        package_dir = os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
 
-# Create Lambda function
-PACKAGE_PATH = os.path.join(DIST_DIR, 'function.zip')
-function = lambda_.Function(
-    resource_name=format_resource_name(name='function'),
-    description=f'Lambda function running the f`{pulumi.get_project()}` ({pulumi.get_stack()}) project',
-    handler=config.require('serverless_handler'),
-    layers=[layer.arn],
-    memory_size=128,
-    role=role.arn,
-    runtime="python3.7",
-    tags={
-        'PROJECT': pulumi.get_project()
-    },
-    timeout=30,
-    tracing_config=None, # TODO: add AWS X-Ray tracing
-    code=PACKAGE_PATH,
-    source_code_hash=filebase64sha256(PACKAGE_PATH),
-    environment={
-      'variables' : {
-        'BUCKET_NAME': bucket.bucket,
-      }
-    },
-)
+        package_path = Path(package_dir)
+        if not package_path.exists():
+            os.makedirs(package_path)
 
-# Exports
-pulumi.export('function_role_name', role.name)
-pulumi.export('layer_name',  layer.layer_name)
-pulumi.export('function_name',  function.name)
+        # Define output path
+        output_fname = 'lambda.zip'
+        output_path = package_path / output_fname
+        output_str = str(output_path.resolve())
+
+        # Get handler path
+        handler_path = package_path / handler
+        handler_path_str = str(handler_path.resolve())
+
+        # Create zip file
+        with ZipFile(output_str, 'w') as z:
+            z.write(filename=handler_path_str, arcname='handler.py')
+        archive = pulumi.FileArchive(path=output_str)
+
+        # Get Route53 Zone
+        zone = route53.get_zone(name=zone_name)
+
+        # Add SES SMTP mx record for inbound emails
+        mx_record = route53.Record(
+            resource_name=format_resource_name("mx-record"),
+            name=domain,
+            records=[f'10 inbound-smtp.{config.region}.amazonaws.com'],
+            ttl=300,
+            type="MX",
+            zone_id=zone.zone_id)
+
+        # Domain verification - Add TXT record to route53 zone to verify domain
+        ses_domain = ses.DomainIdentity(
+            resource_name=format_resource_name("domain-id"), domain=domain)
+
+        ses_verification_record = route53.Record(
+            resource_name=format_resource_name("verification-record"),
+            name=pulumi.Output.concat('_amazonses.', ses_domain.id),
+            records=[ses_domain.verification_token],
+            ttl=600,
+            type="TXT",
+            zone_id=zone.zone_id)
+
+        ses_domain_verification = ses.DomainIdentityVerification(
+            resource_name=format_resource_name("domain-verification"),
+            domain=ses_domain.id,
+            opts=pulumi.ResourceOptions(depends_on=[ses_verification_record]))
+
+        # Create sns topic to push mail content from SES
+        sns_imp_topic = sns.Topic(resource_name=format_resource_name("topic"))
+
+        # Lambda IAM role and policy
+        lambda_role = iam.Role(
+            resource_name=format_resource_name("lambda-role"),
+            assume_role_policy="""{
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Action": "sts:AssumeRole",
+                        "Principal": {
+                            "Service": "lambda.amazonaws.com"
+                        },
+                        "Effect": "Allow",
+                        "Sid": ""
+                    }
+                ]
+            }""")
+
+        lambda_role_policy = iam.RolePolicy(
+            resource_name=format_resource_name("lambda-policy"),
+            role=lambda_role.id,
+            policy="""{
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": [
+                        "logs:CreateLogGroup",
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents"
+                    ],
+                    "Resource": "arn:aws:logs:*:*:*"
+                }]
+            }""")
+
+        # Create Mail processing lambda function & invoke permission
+        mail_processor_function = lambda_.Function(
+            resource_name=format_resource_name("function"),
+            role=lambda_role.arn,
+            runtime="python3.7",
+            handler="handler.lambda_handler",
+            code=archive)
+
+        # Add Lambda invoke permission for SNS
+        allow_sns = lambda_.Permission(
+            resource_name=format_resource_name("permissions"),
+            action="lambda:InvokeFunction",
+            function=mail_processor_function.name,
+            principal="sns.amazonaws.com",
+            source_arn=sns_imp_topic.arn)
+
+        # Add topic subscription to lambda function from sns
+        sns_imp_lambda_sub = sns.TopicSubscription(
+            resource_name=format_resource_name("subscription"),
+            endpoint=mail_processor_function.arn,
+            protocol='lambda',
+            topic=sns_imp_topic.arn)
+
+        # Add SES receipt rule set
+        ses_rule_set = ses.ReceiptRuleSet(
+            resource_name=format_resource_name("rule-set"),
+            rule_set_name='rule-set')
+
+        # Make above reciept rule set active
+        ses_active_rule_set = ses.ActiveReceiptRuleSet(
+            resource_name=format_resource_name("active-rule-set"),
+            rule_set_name='rule-set',
+            opts=pulumi.ResourceOptions(depends_on=[ses_rule_set]))
+
+        # Add reciept rule to the above set
+        ses_confirmation_reciept_rule = ses.ReceiptRule(
+            resource_name=format_resource_name("rule"),
+            enabled=True,
+            rule_set_name=ses_active_rule_set.rule_set_name,
+            recipients=recipients,
+            sns_actions=[{
+                'topic_arn': sns_imp_topic.arn,
+                'position': 0
+            }])
+        self.register_outputs({
+            'function_name': mail_processor_function.name,
+            'sns_topic': sns_imp_topic.name,
+            'reciept_rule_set': ses_active_rule_set
+        })

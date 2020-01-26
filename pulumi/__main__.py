@@ -1,4 +1,10 @@
 import pulumi
+import compute
 
-# Load modules that are to be deployed by Pulumi
-import compute, storage
+mail_processor = compute.InboundMailProcessor(
+    name='test', 
+    zone_name='dev.example.in', 
+    domain="dev.example.in",
+    recipients=['test@dev.example.in'],
+    handler='handler.py'
+)
