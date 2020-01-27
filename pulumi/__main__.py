@@ -1,10 +1,7 @@
 import pulumi
-import compute
+import component
 
-mail_processor = compute.InboundMailProcessor(
-    name='test', 
-    zone_name='dev.example.in', 
-    domain="dev.example.in",
-    recipients=['test@dev.example.in'],
-    handler='handler.py'
+mail_processor = component.InboundMailProcessor(
+    name='test', # name of the resource
+    handler='handler.py' # lambda function to process inbound email
 )

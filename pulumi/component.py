@@ -5,7 +5,6 @@ from utils import format_resource_name, filebase64sha256
 from pathlib import Path
 from zipfile import ZipFile
 
-pulumi_config = pulumi.Config()
 
 class InboundMailProcessor(pulumi.ComponentResource):
     """
@@ -17,22 +16,36 @@ class InboundMailProcessor(pulumi.ComponentResource):
 
     Default behavior is to simply click the first link it finds.
     """
-    def __init__(self,
-                 name,
-                 zone_name,
-                 domain,
-                 recipients,
-                 handler="handler.py",
-                 opts=None):
+    def __init__(self, name, handler="handler.py", opts=None):
         """
         :name: name of the resource
-        :zone_name: name of the route53 zone
-        :domain: domain name for email
-        :recipients: list of emails
         :handler: path to the Lambda handler module, if any
         """
         super().__init__('nuage:aws:InboundMailProcessor', name, None, opts)
+        self.handler = handler
+
         # Get or create package directory
+        archive_path = self.package_handler()
+
+        pulumi_config = pulumi.Config()
+        self.domain = pulumi_config.get('domain')
+        self.zone = pulumi_config.get('domain')
+        zone = self.verify_domain(self.zone, self.domain)
+        sns_topic = self.add_sns_topic()
+        lambda_function = self.add_lambda(archive_path, sns_topic)
+        topic_sub = self.add_sns_topic_subscription(sns_topic, lambda_function)
+        email_id = self.add_ses(sns_topic)
+
+        self.register_outputs({
+            'function_name': lambda_function.name,
+            'sns_topic': sns_topic.name,
+            'email_id': email_id
+        })
+
+    def package_handler(self):
+        """
+        Zip lambda function handler
+        """
         package_dir = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
 
@@ -46,14 +59,15 @@ class InboundMailProcessor(pulumi.ComponentResource):
         output_str = str(output_path.resolve())
 
         # Get handler path
-        handler_path = package_path / handler
+        handler_path = package_path / self.handler
         handler_path_str = str(handler_path.resolve())
 
         # Create zip file
         with ZipFile(output_str, 'w') as z:
             z.write(filename=handler_path_str, arcname='handler.py')
-        archive = pulumi.FileArchive(path=output_str)
+        return output_str
 
+    def verify_domain(self, zone_name: str, domain: str):
         # Get Route53 Zone
         zone = route53.get_zone(name=zone_name)
 
@@ -83,10 +97,17 @@ class InboundMailProcessor(pulumi.ComponentResource):
             domain=ses_domain.id,
             opts=pulumi.ResourceOptions(depends_on=[ses_verification_record]))
 
-        # Create sns topic to push mail content from SES
+    def add_sns_topic(self):
+        """
+        Create sns topic to push mail content from SES
+        """
         sns_imp_topic = sns.Topic(resource_name=format_resource_name("topic"))
+        return sns_imp_topic
 
-        # Lambda IAM role and policy
+    def add_lambda(self, archive_path: str, sns_topic: sns.Topic):
+        """
+        Create lambda function with sns invoke permission
+        """
         lambda_role = iam.Role(
             resource_name=format_resource_name("lambda-role"),
             assume_role_policy="""{
@@ -119,52 +140,59 @@ class InboundMailProcessor(pulumi.ComponentResource):
                 }]
             }""")
 
-        # Create Mail processing lambda function & invoke permission
         mail_processor_function = lambda_.Function(
             resource_name=format_resource_name("function"),
             role=lambda_role.arn,
             runtime="python3.7",
             handler="handler.lambda_handler",
-            code=archive)
-
-        # Add Lambda invoke permission for SNS
+            code=archive_path,
+            source_code_hash=filebase64sha256(archive_path))
         allow_sns = lambda_.Permission(
             resource_name=format_resource_name("permissions"),
             action="lambda:InvokeFunction",
             function=mail_processor_function.name,
             principal="sns.amazonaws.com",
-            source_arn=sns_imp_topic.arn)
+            source_arn=sns_topic.arn)
+        return mail_processor_function
 
-        # Add topic subscription to lambda function from sns
+    def add_sns_topic_subscription(self, sns_topic: sns.Topic,
+                                   lambda_fn: lambda_.Function):
+        """
+        Creates sns topic subscription to lambda function
+        """
         sns_imp_lambda_sub = sns.TopicSubscription(
             resource_name=format_resource_name("subscription"),
-            endpoint=mail_processor_function.arn,
+            endpoint=lambda_fn.arn,
             protocol='lambda',
-            topic=sns_imp_topic.arn)
+            topic=sns_topic.arn)
+        return sns_imp_lambda_sub
 
-        # Add SES receipt rule set
+    def add_ses(self, sns_topic: sns.Topic):
+        """
+        Creates ses receipt rule set and receipt rule
+        """
+        rule_set_name = f'{pulumi.get_stack()}-imp-set'
+
+        email_id = f'inbound-email@{self.domain}'
+
         ses_rule_set = ses.ReceiptRuleSet(
             resource_name=format_resource_name("rule-set"),
-            rule_set_name='rule-set')
+            rule_set_name=rule_set_name)
 
         # Make above reciept rule set active
         ses_active_rule_set = ses.ActiveReceiptRuleSet(
             resource_name=format_resource_name("active-rule-set"),
-            rule_set_name='rule-set',
+            rule_set_name=rule_set_name,
             opts=pulumi.ResourceOptions(depends_on=[ses_rule_set]))
 
         # Add reciept rule to the above set
-        ses_confirmation_reciept_rule = ses.ReceiptRule(
+        ses_confirmation_receipt_rule = ses.ReceiptRule(
             resource_name=format_resource_name("rule"),
             enabled=True,
             rule_set_name=ses_active_rule_set.rule_set_name,
-            recipients=recipients,
+            recipients=[email_id],
             sns_actions=[{
-                'topic_arn': sns_imp_topic.arn,
+                'topic_arn': sns_topic.arn,
                 'position': 0
             }])
-        self.register_outputs({
-            'function_name': mail_processor_function.name,
-            'sns_topic': sns_imp_topic.name,
-            'reciept_rule_set': ses_active_rule_set
-        })
+        return email_id
