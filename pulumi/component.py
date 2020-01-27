@@ -179,13 +179,13 @@ class InboundMailProcessor(pulumi.ComponentResource):
             resource_name=format_resource_name("rule-set"),
             rule_set_name=rule_set_name)
 
-        # Make above reciept rule set active
+        # Make above receipt rule set active
         ses_active_rule_set = ses.ActiveReceiptRuleSet(
             resource_name=format_resource_name("active-rule-set"),
             rule_set_name=rule_set_name,
             opts=pulumi.ResourceOptions(depends_on=[ses_rule_set]))
 
-        # Add reciept rule to the above set
+        # Add receipt rule to the above set
         ses_confirmation_receipt_rule = ses.ReceiptRule(
             resource_name=format_resource_name("rule"),
             enabled=True,
