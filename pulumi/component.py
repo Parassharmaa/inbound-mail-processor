@@ -1,5 +1,6 @@
 import os
 import pulumi
+from pulumi import log
 from pulumi_aws import route53, ses, lambda_, config, sns, iam
 from utils import format_resource_name, filebase64sha256
 from pathlib import Path
@@ -28,19 +29,19 @@ class InboundMailProcessor(pulumi.ComponentResource):
         archive_path = self.package_handler()
 
         pulumi_config = pulumi.Config()
-        self.domain = pulumi_config.get('domain')
-        self.zone = pulumi_config.get('domain')
-        zone = self.verify_domain(self.zone, self.domain)
+
+        # dns stack reference
+        dns_stack = self.stack_reference(pulumi_config.get('dns_stack'))
+        self.domain = dns_stack.require_output('domain_name')
+        self.zone = dns_stack.require_output('zone_name')
+
+        # ses --> sns --> lambda pipeline
         sns_topic = self.add_sns_topic()
         lambda_function = self.add_lambda(archive_path, sns_topic)
         topic_sub = self.add_sns_topic_subscription(sns_topic, lambda_function)
-        email_id = self.add_ses(sns_topic)
+        self.email_id = self.add_ses(sns_topic)
 
-        self.register_outputs({
-            'function_name': lambda_function.name,
-            'sns_topic': sns_topic.name,
-            'email_id': email_id
-        })
+        self.register_outputs({'email_id': self.email_id})
 
     def package_handler(self):
         """
@@ -67,35 +68,9 @@ class InboundMailProcessor(pulumi.ComponentResource):
             z.write(filename=handler_path_str, arcname='handler.py')
         return output_str
 
-    def verify_domain(self, zone_name: str, domain: str):
-        # Get Route53 Zone
-        zone = route53.get_zone(name=zone_name)
-
-        # Add SES SMTP mx record for inbound emails
-        mx_record = route53.Record(
-            resource_name=format_resource_name("mx-record"),
-            name=domain,
-            records=[f'10 inbound-smtp.{config.region}.amazonaws.com'],
-            ttl=300,
-            type="MX",
-            zone_id=zone.zone_id)
-
-        # Domain verification - Add TXT record to route53 zone to verify domain
-        ses_domain = ses.DomainIdentity(
-            resource_name=format_resource_name("domain-id"), domain=domain)
-
-        ses_verification_record = route53.Record(
-            resource_name=format_resource_name("verification-record"),
-            name=pulumi.Output.concat('_amazonses.', ses_domain.id),
-            records=[ses_domain.verification_token],
-            ttl=600,
-            type="TXT",
-            zone_id=zone.zone_id)
-
-        ses_domain_verification = ses.DomainIdentityVerification(
-            resource_name=format_resource_name("domain-verification"),
-            domain=ses_domain.id,
-            opts=pulumi.ResourceOptions(depends_on=[ses_verification_record]))
+    def stack_reference(self, stack_name: str):
+        stack = pulumi.StackReference(stack_name)
+        return stack
 
     def add_sns_topic(self):
         """
@@ -173,7 +148,7 @@ class InboundMailProcessor(pulumi.ComponentResource):
         """
         rule_set_name = f'{pulumi.get_stack()}-imp-set'
 
-        email_id = f'inbound-email@{self.domain}'
+        email_id = pulumi.output.Output.concat('inbound-mail@', self.domain)
 
         ses_rule_set = ses.ReceiptRuleSet(
             resource_name=format_resource_name("rule-set"),
@@ -196,3 +171,73 @@ class InboundMailProcessor(pulumi.ComponentResource):
                 'position': 0
             }])
         return email_id
+
+
+class SesDNSConfig(pulumi.ComponentResource):
+    """
+    SesDNSConfig adds MX record to route53 and verifies the 
+    ownership of configured domain name for SES.
+    
+    It requires domain_name and zone to be configured in the stack configuration.
+    """
+    def __init__(self, name, opts=None):
+        """
+        :name: name of the resource
+        """
+        super().__init__('nuage:aws:SesDNSConfig', name, None, opts)
+        pulumi_config = pulumi.Config()
+        self.zone_name = pulumi_config.require('zone_name')
+        self.domain_name = pulumi_config.require('domain_name')
+        zone = self.get_hosted_zone()
+        mx_record = self.add_mx_record(zone)
+        domain_identity = self.verify_domain(zone)
+
+        self.register_outputs({
+            'domain_name': self.domain_name,
+            'zone_name': self.zone_name,
+            'zone_id': zone.zone_id
+        })
+
+    def get_hosted_zone(self):
+        """
+        Get Route53 Hosted Zone
+        """
+        zone = route53.get_zone(name=self.zone_name)
+        return zone
+
+    def add_mx_record(self, zone: route53.Zone):
+        """
+        Adds MX record to route 53 zone for inbound emails
+        """
+        mx_record = route53.Record(
+            resource_name=format_resource_name("mx-record"),
+            name=self.domain_name,
+            records=[f'10 inbound-smtp.{config.region}.amazonaws.com'],
+            ttl=300,
+            type="MX",
+            zone_id=zone.zone_id)
+        return mx_record
+
+    def verify_domain(self, zone: route53.Zone):
+        """
+        Verifies the domain nam with SES
+        """
+
+        # Add TXT record to route53 zone to verify domain
+        ses_domain = ses.DomainIdentity(
+            resource_name=format_resource_name("domain-id"),
+            domain=self.domain_name)
+
+        ses_verification_record = route53.Record(
+            resource_name=format_resource_name("verification-record"),
+            name=pulumi.Output.concat('_amazonses.', ses_domain.id),
+            records=[ses_domain.verification_token],
+            ttl=600,
+            type="TXT",
+            zone_id=zone.zone_id)
+
+        ses_domain_verification = ses.DomainIdentityVerification(
+            resource_name=format_resource_name("domain-verification"),
+            domain=ses_domain.id,
+            opts=pulumi.ResourceOptions(depends_on=[ses_verification_record]))
+        return ses_domain

@@ -1,0 +1,4 @@
+config:
+  aws:region: us-east-1
+  inbound-mail-processor:domain_name: example.in
+  inbound-mail-processor:zone_name: example.in
