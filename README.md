@@ -2,61 +2,84 @@
 
 # Overview
 
-The purpose of this bucket is to set up best practices for quickly developing Pulumi projects in Python.
+Creates an email address for which emails get automatically processed by a Lambda.
 
-## Directory structure
+Route53 & domain verification is handled in *core* stack, and contains common configuration.
+
+
+## Getting started
+
+1. Create a Python virtualenv, activate it, and install dependencies:
 
 ```
-.
-├── Makefile
-├── Pulumi.yaml
-├── README.md
-├── handler.py
-├── pulumi
-│   ├── __main__.py
-│   ├── compute.py
-│   ├── dynamic_providers
-│   │   ├── __init__.py
-│   │   └── github
-│   │       ├── __init__.py
-│   │       └── label.py
-│   ├── label.py
-│   ├── stacks
-│   │   └── Pulumi.dev.yaml
-│   ├── storage.py
-│   └── utils.py
-└── requirements
-    ├── dynamic_providers.txt
-    ├── global.txt
-    └── lambda.txt
+$ virtualenv -p python3 venv
+$ virtualenv -p python3 venv
+$ source venv/bin/activate
+$ pip3 install -r requirements.txt
+```
+2. Create the required stacks
+
+```
+$ pulumi stack init core
+$ pulumi stack init dev
 ```
 
-Note that each Pulumi resource is separated by category (ex: compute, storage...)
-[__main__.py](./pulumi/__main__.py) merely contains import statements.
+3. Configure & Deploy core stack
 
-## Dynamic Provider
+```
+$ pulum stack select core
+$ pulumi config set aws:region <region>
+$ pulumi config set zone_name <example.com>
+$ pulumi config set domain_name <example.com>
 
-Pulumi [Dynamic Providers](https://www.pulumi.com/docs/intro/concepts/programming-model/#dynamicproviders) allows you to easily code in Python a provising logic for resources that do not yet have a Terraform provider.
+$ pulumi up
+```
+__Output__
+```
+Updating (core):
 
-The boilerplate is inspired upon the [Github example](https://www.pulumi.com/docs/intro/concepts/programming-model/#example-github-labels-rest-api) in the documentation.
 
-The dynamic provider itself is in [pulumi/dynamic_providers/github](./pulumi/dynamic_providers/github) but the resource declaration has been moved to [pulumi/label.py](./pulumi/label.py).
+     Type                                   Name                                             Status      
+ +   pulumi:pulumi:Stack                    inbound-mail-processor-core                      created     
+ +   ├─ nuage:aws:SesDNSConfig              inbound-mail-dns-test                            created     
+ +   ├─ aws:ses:DomainIdentity              inbound-mail-processor-core-domain-id            created     
+ +   ├─ aws:route53:Record                  inbound-mail-processor-core-mx-record            created     
+ +   ├─ aws:route53:Record                  inbound-mail-processor-core-verification-record  created     
+ +   └─ aws:ses:DomainIdentityVerification  inbound-mail-processor-core-domain-verification  created     
+ 
+Resources:
+    + 6 created                                                                                    
+Outputs:
+  + domain_name: "dev.kidaura.in"
+  + zone_name  : "dev.kidaura.in"
 
-Since most dynamic providers will require SDKs, we've created a separate requirements file for that purpose.
+Resources:
+    6 unchanged
 
-## Lambda
+Duration: 11s
+```
 
-The [Makefile](./Makefile) contains basic boilerplate for packaging a Lambda (which you may or may not need depending on your project).
+4. Configure and deploy [dev | prod] stack
+```
+$ pulumi stack select dev
+$ pulumi config set aws:region <region>
+$ pulumi config set dns_stack <organisation>/<project>/core
 
-In order to notify Pulumi wether the Lambda needs to be updated, we're using a hashing mechanism (see [utils.py](./pulumi/utils.py) that checks the packages zip file : everytime you make a new zip, Pulumi detects the change and performs the update of the function during the next `pulumi up`.
+$ pulumi up
+```
 
-Lambda also has its own requirements file in order to limit the package size : we only put in [requirements/lambda.txt](./requirements/lambda.txt) what is actually needed for the Lambda to run.
-If your Lambda doesn't require extra `pip` packages then you can simply ignore the Layer part of the Makefile and in [compute.py](./pulumi/compute.py).
+Output:
 
-# Getting started
+```
+Updating (dev):                        
+     Type                               Name                                        Status                                                            +   pulumi:pulumi:Stack                inbound-mail-processor-dev                  created                                                           +   ├─ nuage:aws:InboundMailProcessor  inbound-mail-processor-test                 created                                                           +   ├─ aws:iam:Role                    inbound-mail-processor-dev-lambda-role      created                                                           +   ├─ aws:sns:Topic                   inbound-mail-processor-dev-topic            created                                                           +   ├─ aws:ses:ReceiptRuleSet          inbound-mail-processor-dev-rule-set         created                                                           +   ├─ aws:iam:RolePolicy              inbound-mail-processor-dev-lambda-policy    created                                                           +   ├─ aws:lambda:Function             inbound-mail-processor-dev-function         created                                                           +   ├─ aws:ses:ActiveReceiptRuleSet    inbound-mail-processor-dev-active-rule-set  created                                                           +   ├─ aws:ses:ReceiptRule             inbound-mail-processor-dev-rule             created                                                           +   ├─ aws:sns:TopicSubscription       inbound-mail-processor-dev-subscription     created                                                           +   └─ aws:lambda:Permission           inbound-mail-processor-dev-permissions      created                                                                                                                                                                                           Outputs:                                                                                                                                                 email_id: "inbound-mail@example.in"                                                                                                                                                                                                                                                               Resources:                                                                                                                                               + 11 created                                                                                                                                                                                                                                                                                          Duration: 36s     
+```
 
-A good place to start with Pulumi is the [Documentation](https://www.pulumi.com/docs/).
+## Clean up
 
-Most of the AWS-related documentation in Pulumi is somewhat lacking, so the best place to get info regarding AWS is to look at the [Terraform counterpart](https://www.terraform.io/docs/providers/aws/) (since Pulumi is merely a wrapper around it).
+Destroy all the stack i.e: core, dev, prod.
 
-Ultimately, the best documentation for Pulumi is its source code available on [Github](https://github.com/pulumi/pulumi-aws/tree/master/sdk/python/pulumi_aws).
+```
+$ pulumi destroy
+$ pulumi stack rm
+```
