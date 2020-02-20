@@ -1,11 +1,5 @@
 import re
-import urllib.request
-
-headers = {
-    'User-Agent':
-    'Mozilla/5.0 (X11; Linux i686) AppleWebKit/537.17 (KHTML, like Gecko) Chrome/24.0.1312.27 Safari/537.17'
-}
-
+import requests
 
 def lambda_handler(event, context):
     message = event['Records'][0]['Sns']['Message']
@@ -20,8 +14,7 @@ def lambda_handler(event, context):
 
     print("All urls:", urls)
     if len(urls):
-        req = urllib.request.Request(urls[0], headers=headers)
-        resp = urllib.request.urlopen(req)
-        print("Request Status:", resp.status)
+        response = requests.get(urls[0])
+        print("Request Status:", response.status_code)
     else:
         print("No Url")

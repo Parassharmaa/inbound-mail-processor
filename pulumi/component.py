@@ -5,7 +5,7 @@ from pulumi_aws import route53, ses, lambda_, config, sns, iam
 from utils import format_resource_name, filebase64sha256
 from pathlib import Path
 from zipfile import ZipFile
-
+from lambda_packaging import LambdaPackage
 
 class InboundMailProcessor(pulumi.ComponentResource):
     """
@@ -28,6 +28,8 @@ class InboundMailProcessor(pulumi.ComponentResource):
         # Get or create package directory
         archive_path = self.package_handler()
 
+        pulumi.log.info(archive_path)
+
         pulumi_config = pulumi.Config()
 
         # dns stack reference
@@ -38,7 +40,8 @@ class InboundMailProcessor(pulumi.ComponentResource):
         # ses --> sns --> lambda pipeline
         sns_topic = self.add_sns_topic()
         lambda_function = self.add_lambda(archive_path, sns_topic)
-        topic_sub = self.add_sns_topic_subscription(sns_topic, lambda_function)
+
+        self.add_sns_topic_subscription(sns_topic, lambda_function)
         self.email_id = self.add_ses(sns_topic)
 
         self.register_outputs({'email_id': self.email_id})
@@ -47,27 +50,16 @@ class InboundMailProcessor(pulumi.ComponentResource):
         """
         Zip lambda function handler
         """
-        package_dir = os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))
+        lambda_package = LambdaPackage(
+            name='lambda-package', 
+            requirements_path='../requirements.txt', 
+            exclude=['*'], 
+            include=['../handler.py'], 
+            no_deploy=['pulumi_aws', 'pulumi', 'lambda_packaging', 'autopep8', 'pylint']
+        )
+        return lambda_package.package_archive
 
-        package_path = Path(package_dir)
-        if not package_path.exists():
-            os.makedirs(package_path)
-
-        # Define output path
-        output_fname = 'lambda.zip'
-        output_path = package_path / output_fname
-        output_str = str(output_path.resolve())
-
-        # Get handler path
-        handler_path = package_path / self.handler
-        handler_path_str = str(handler_path.resolve())
-
-        # Create zip file
-        with ZipFile(output_str, 'w') as z:
-            z.write(filename=handler_path_str, arcname='handler.py')
-        return output_str
-
+        
     def stack_reference(self, stack_name: str):
         stack = pulumi.StackReference(stack_name)
         return stack
